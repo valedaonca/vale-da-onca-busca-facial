@@ -1,0 +1,7 @@
+streamlit>=1.32.0
+deepface>=0.0.90
+tf-keras
+opencv-contrib-python-headless
+numpy
+requests
+mtcnn
