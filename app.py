@@ -15,6 +15,7 @@ chegou a confundir duas pessoas diferentes nos nossos testes.
 """
 
 import os
+import re
 import pickle
 import time
 
@@ -36,51 +37,56 @@ DISTANCE_THRESHOLD = 0.68  # quanto MENOR, mais parecido — validado nos testes
 
 EMBEDDINGS_FILE = "embeddings.pkl"
 
+IMG_SIZE_SUFFIX = "b"  # "b" = até 1024px no lado maior, público, sem precisar de API paga
+
 # ============================================================
 
 st.set_page_config(page_title="Vale da Onça — Busca por rosto", page_icon="🐆", layout="centered")
 
 
-def get_all_flickr_photos(api_key, user_id, photoset_id, status_area=None):
-    photos = []
+PHOTO_PATTERN = re.compile(r"live\.staticflickr\.com/(\d+)/(\d+)_([0-9a-f]+)(?:_\w+)?\.jpg")
+
+
+def get_all_flickr_photos(user_id, photoset_id, status_area=None):
+    """Lê as páginas públicas do álbum (sem precisar de chave de API) e
+    extrai os IDs das fotos direto do HTML."""
+    photos = {}
     page = 1
+    empty_pages_in_a_row = 0
+
     while True:
-        resp = requests.get(
-            "https://www.flickr.com/services/rest/",
-            params={
-                "method": "flickr.photosets.getPhotos",
-                "api_key": api_key,
-                "photoset_id": photoset_id,
-                "user_id": user_id,
-                "extras": "url_o,url_l,url_c",
-                "per_page": 500,
-                "page": page,
-                "format": "json",
-                "nojsoncallback": 1,
-            },
-            timeout=30,
-        )
-        data = resp.json()
-        if data.get("stat") != "ok":
-            raise RuntimeError(f"Erro na API do Flickr: {data}")
+        url = f"https://www.flickr.com/photos/{user_id}/albums/{photoset_id}/page{page}"
+        resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        found = PHOTO_PATTERN.findall(resp.text)
 
-        photoset = data["photoset"]
-        photos.extend(photoset["photo"])
+        new_on_this_page = 0
+        for server, photo_id, secret in found:
+            if photo_id not in photos:
+                photos[photo_id] = {"server": server, "secret": secret}
+                new_on_this_page += 1
+
         if status_area:
-            status_area.write(f"Página {page}/{photoset['pages']} — {len(photos)} fotos até agora")
+            status_area.write(f"Página {page} — {len(photos)} fotos únicas encontradas até agora")
 
-        if page >= photoset["pages"]:
-            break
+        if new_on_this_page == 0:
+            empty_pages_in_a_row += 1
+            if empty_pages_in_a_row >= 2:
+                break
+        else:
+            empty_pages_in_a_row = 0
+
         page += 1
+        if page > 200:  # trava de segurança
+            break
 
-    return photos
+    result = []
+    for photo_id, info in photos.items():
+        result.append({"id": photo_id, "server": info["server"], "secret": info["secret"]})
+    return result
 
 
 def best_image_url(photo):
-    for key in ("url_o", "url_l", "url_c"):
-        if photo.get(key):
-            return photo[key]
-    return None
+    return f"https://live.staticflickr.com/{photo['server']}/{photo['id']}_{photo['secret']}_{IMG_SIZE_SUFFIX}.jpg"
 
 
 def flickr_page_url(user_id, photoset_id, photo_id):
@@ -205,21 +211,16 @@ def page_index():
         "novo sem duplicar trabalho."
     )
 
-    flickr_api_key = st.text_input("Chave da API do Flickr", type="password")
     flickr_user_id = st.text_input("Flickr User ID", value=FLICKR_USER_ID_DEFAULT)
     flickr_photoset_id = st.text_input("Flickr Photoset ID", value=FLICKR_PHOTOSET_ID_DEFAULT)
 
     if st.button("Indexar fotos", type="primary"):
-        if not flickr_api_key:
-            st.error("Preencha a chave da API do Flickr.")
-            return
-
         entries = load_embeddings()
         already_done = {e["photo_id"] for e in entries}
 
         status_area = st.empty()
         status_area.write("Buscando lista de fotos no Flickr...")
-        photos = get_all_flickr_photos(flickr_api_key, flickr_user_id, flickr_photoset_id, status_area)
+        photos = get_all_flickr_photos(flickr_user_id, flickr_photoset_id, status_area)
         total = len(photos)
 
         st.write(f"Total de fotos no álbum: {total} — já indexadas antes: {len(already_done)}")
