@@ -44,13 +44,20 @@ IMG_SIZE_SUFFIX = "b"  # "b" = até 1024px no lado maior, público, sem precisar
 st.set_page_config(page_title="Vale da Onça — Busca por rosto", page_icon="🐆", layout="centered")
 
 
-PHOTO_PATTERN = re.compile(r"live\.staticflickr\.com/(\d+)/(\d+)_([0-9a-f]+)(?:_\w+)?\.jpg")
+PHOTO_ID_PATTERN_TEMPLATE = r"/{user}/(\d+)/in/album-{photoset}"
+OG_IMAGE_PATTERN = re.compile(r'<meta property="og:image" content="([^"]+)"')
 
 
 def get_all_flickr_photos(user_id, photoset_id, status_area=None):
     """Lê as páginas públicas do álbum (sem precisar de chave de API) e
-    extrai os IDs das fotos direto do HTML."""
-    photos = {}
+    extrai os IDs das fotos a partir dos links de cada foto individual —
+    esses links aparecem completos no HTML, diferente das miniaturas da
+    grade, que carregam aos poucos conforme rola a página."""
+    id_pattern = re.compile(
+        PHOTO_ID_PATTERN_TEMPLATE.format(user=re.escape(user_id), photoset=re.escape(photoset_id))
+    )
+
+    photo_ids = set()
     page = 1
     empty_pages_in_a_row = 0
     duplicate_pages_in_a_row = 0
@@ -58,29 +65,23 @@ def get_all_flickr_photos(user_id, photoset_id, status_area=None):
     while True:
         url = f"https://www.flickr.com/photos/{user_id}/sets/{photoset_id}/page{page}"
         resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-        found = PHOTO_PATTERN.findall(resp.text)
-
-        new_on_this_page = 0
-        for server, photo_id, secret in found:
-            if photo_id not in photos:
-                photos[photo_id] = {"server": server, "secret": secret}
-                new_on_this_page += 1
+        found = set(id_pattern.findall(resp.text))
+        new_on_this_page = found - photo_ids
 
         if status_area:
             status_area.write(
                 f"Página {page} — {len(found)} fotos nessa página, "
-                f"{new_on_this_page} novas — {len(photos)} fotos únicas até agora"
+                f"{len(new_on_this_page)} novas — {len(photo_ids) + len(new_on_this_page)} fotos únicas até agora"
             )
 
+        photo_ids |= new_on_this_page
+
         if len(found) == 0:
-            # página genuinamente vazia — provavelmente passamos da última página
             empty_pages_in_a_row += 1
             duplicate_pages_in_a_row = 0
             if empty_pages_in_a_row >= 3:
                 break
-        elif new_on_this_page == 0:
-            # a página tem fotos, mas todas repetidas — sinal de que a
-            # paginação pode estar presa/redirecionando, não que acabou
+        elif len(new_on_this_page) == 0:
             empty_pages_in_a_row = 0
             duplicate_pages_in_a_row += 1
             if duplicate_pages_in_a_row >= 5:
@@ -93,14 +94,19 @@ def get_all_flickr_photos(user_id, photoset_id, status_area=None):
         if page > 250:  # trava de segurança
             break
 
-    result = []
-    for photo_id, info in photos.items():
-        result.append({"id": photo_id, "server": info["server"], "secret": info["secret"]})
-    return result
+    return [{"id": pid} for pid in photo_ids]
 
 
-def best_image_url(photo):
-    return f"https://live.staticflickr.com/{photo['server']}/{photo['id']}_{photo['secret']}_{IMG_SIZE_SUFFIX}.jpg"
+def fetch_image_url_for_photo(user_id, photo_id):
+    """Abre a página individual dessa foto e pega a URL real da imagem
+    (presente de forma confiável na tag og:image, usada por qualquer rede
+    social pra gerar preview — não depende de JS/rolagem)."""
+    url = f"https://www.flickr.com/photos/{user_id}/{photo_id}/"
+    resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    match = OG_IMAGE_PATTERN.search(resp.text)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def flickr_page_url(user_id, photoset_id, photo_id):
@@ -251,8 +257,10 @@ def page_index():
             if photo["id"] in already_done:
                 continue
 
-            image_url = best_image_url(photo)
+            image_url = fetch_image_url_for_photo(flickr_user_id, photo["id"])
             if not image_url:
+                errors += 1
+                log_area.write(f"Foto {photo['id']}: não achei a URL da imagem, pulando.")
                 continue
 
             try:
