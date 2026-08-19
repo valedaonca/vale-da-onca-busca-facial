@@ -53,9 +53,10 @@ def get_all_flickr_photos(user_id, photoset_id, status_area=None):
     photos = {}
     page = 1
     empty_pages_in_a_row = 0
+    duplicate_pages_in_a_row = 0
 
     while True:
-        url = f"https://www.flickr.com/photos/{user_id}/albums/{photoset_id}/page{page}"
+        url = f"https://www.flickr.com/photos/{user_id}/sets/{photoset_id}/page{page}"
         resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
         found = PHOTO_PATTERN.findall(resp.text)
 
@@ -66,17 +67,30 @@ def get_all_flickr_photos(user_id, photoset_id, status_area=None):
                 new_on_this_page += 1
 
         if status_area:
-            status_area.write(f"Página {page} — {len(photos)} fotos únicas encontradas até agora")
+            status_area.write(
+                f"Página {page} — {len(found)} fotos nessa página, "
+                f"{new_on_this_page} novas — {len(photos)} fotos únicas até agora"
+            )
 
-        if new_on_this_page == 0:
+        if len(found) == 0:
+            # página genuinamente vazia — provavelmente passamos da última página
             empty_pages_in_a_row += 1
-            if empty_pages_in_a_row >= 2:
+            duplicate_pages_in_a_row = 0
+            if empty_pages_in_a_row >= 3:
+                break
+        elif new_on_this_page == 0:
+            # a página tem fotos, mas todas repetidas — sinal de que a
+            # paginação pode estar presa/redirecionando, não que acabou
+            empty_pages_in_a_row = 0
+            duplicate_pages_in_a_row += 1
+            if duplicate_pages_in_a_row >= 5:
                 break
         else:
             empty_pages_in_a_row = 0
+            duplicate_pages_in_a_row = 0
 
         page += 1
-        if page > 200:  # trava de segurança
+        if page > 250:  # trava de segurança
             break
 
     result = []
